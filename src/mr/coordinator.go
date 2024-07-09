@@ -123,7 +123,7 @@ func (c *Coordinator) scheduleTask() {
 				}
 			}
 		case ReducePeriod:
-			for i, status := range c.taskStatus {
+			for i, status := range c.taskStatus { // 同上
 				if status == ReadyTaskStatus {
 					task.Files = c.reduceFiles[i]
 					task.Index = i
@@ -136,6 +136,7 @@ func (c *Coordinator) scheduleTask() {
 	}
 }
 
+// checkHeart 主要是检查某个任务是否超时,同时也肩负起了转换Period的使命
 func (c *Coordinator) checkHeart() {
 	expect := TaskDuration.Milliseconds()
 	overTime := func(cost int64) bool {
@@ -163,7 +164,7 @@ func (c *Coordinator) checkHeart() {
 		// checkHeart之后顺便检查当前状态
 		finish := true
 		for _, status := range c.taskStatus {
-			if status != CompleteTaskStatus {
+			if status != CompleteTaskStatus { // 如果全部完成那就将当前Period标记为完成,准备转换Period
 				finish = false
 			}
 		}
@@ -181,10 +182,12 @@ func (c *Coordinator) checkHeart() {
 	}
 }
 
+// processMiddleFile 对中间文件的处理,其实就是对从Map过程中生成的
+// 中间文件进行归类划分,方便下一步的reduce
 func (c *Coordinator) processMiddleFile(filepaths []string) {
 	getIndex := func(path string) int {
 		parts := strings.Split(path, "-")
-		part := parts[2]
+		part := parts[2] // 获得序列号
 		i, _ := strconv.Atoi(part)
 		return i
 	}

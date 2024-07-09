@@ -33,8 +33,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	Client = c
 	for {
 		time.Sleep(HeartInterval)
-		reply := getTask()
-		if reply.Period == CompletePeriod {
+		reply := getTask()                  // 尝试通过rpc向Coordinator请求任务
+		if reply.Period == CompletePeriod { // 如果Coordinator告知已经结束,那就结束
 			break
 		}
 		if period := doTask(&reply.Task, mapf, reducef); period == CompletePeriod {
@@ -54,6 +54,7 @@ func getTask() *ReqTaskReply {
 	return &reply
 }
 
+// doTask 尝试完成任务
 func doTask(task *Task, mapf func(string, string) []KeyValue, reducef func(string, []string) string) Period {
 	if task.Period == MapPeriod {
 		middlePath := DoMapTask(mapf, task.Files[0], task.Index, task.ReduceNum)
@@ -81,8 +82,10 @@ func DoMapTask(mapf func(string, string) []KeyValue, filepath string, index int,
 		log.Fatalf("failed when read from %s file,error: %v", filepath, err)
 	}
 	_ = file.Close()
+
 	kvs := mapf(filepath, string(body))
 	middlePaths := make([]string, reduceNum)
+
 	for i := 0; i < reduceNum; i++ {
 		middleFileName := getMiddleFileName(index, i)
 		middlePaths = append(middlePaths, middleFileName)
