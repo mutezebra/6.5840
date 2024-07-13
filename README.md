@@ -18,4 +18,6 @@
 等待程序结束之后可以输入命令查看结果
 > $ cat mr-out-* | sort | more
 
-
+## LAB2
+> $ cd src/kvsrv  
+> $ go test -race  
