@@ -21,3 +21,8 @@
 ## LAB2
 > $ cd src/kvsrv  
 > $ go test -race  
+
+## LAB3
+### part 3A
+> $ cd src/raft  
+> $ go test -race -run 3A  
