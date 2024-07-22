@@ -15,10 +15,9 @@ package raft
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
-//
+//   每有一个条目提交到log之后，raft应该发送一条ApplyMsg 到 ch中
 
 import (
-	//	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -27,7 +26,6 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -50,28 +48,26 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-// A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
-
+	mu          sync.RWMutex        // Lock to protect shared access to this peer's state
+	peers       []*labrpc.ClientEnd // RPC end points of all peers
+	persister   *Persister          // Object to hold this peer's persisted state
+	me          int                 // this peer's index into peers[]
+	dead        int32               // set by Kill()
+	term        atomic.Int32
+	isLeader    atomic.Bool
+	isCandidate atomic.Bool
+	lastHeart   atomic.Int64 // millisecond
+	sendRPCPool sync.Pool
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (3A).
-	return term, isleader
+	return int(rf.term.Load()), rf.isLeader.Load()
 }
 
 // save Raft's persistent state to stable storage,
@@ -91,7 +87,6 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -113,7 +108,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,56 +117,129 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+func (rf *Raft) sendRPC(server int, method string, arg, reply interface{}) bool {
+	timeout := time.After(10 * time.Millisecond)
+	done := rf.sendRPCPoolGet()
+	defer rf.sendRPCPoolPut(done)
+	go func() {
+		done <- rf.peers[server].Call(method, arg, reply)
+	}()
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
+	select {
+	case ok := <-done:
+		return ok
+	case <-timeout:
+		return false
+	}
+}
+
 type RequestVoteArgs struct {
+	Term        int
+	CandidateID int
 	// Your data here (3A, 3B).
 }
 
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
+	GrantVote bool
 }
 
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	vote := func() {
+		reply.GrantVote = true
+		DPrintf("%d vote to %d\n", rf.me, args.CandidateID)
+	}
+
+	term := int(rf.term.Load())
+	if term > args.Term-1 {
+		reply.GrantVote = false
+		DPrintf("%d号拒绝给%d号投票，因为%d号的term>=arg.Term\n", rf.me, args.CandidateID, rf.me)
+		return
+	}
+	if rf.isLeader.Load() {
+		reply.GrantVote = false
+		DPrintf("%d号拒绝给%d号投票，因为%d号是Leader\n", rf.me, args.CandidateID, rf.me)
+		return
+	}
+	if rf.isCandidate.Load() {
+		if term != args.Term-1 {
+			vote()
+			return
+		}
+		if rf.me < args.CandidateID {
+			reply.GrantVote = false
+			DPrintf("%d号拒绝给%d号投票，因为%d的序列更靠前\n", rf.me, args.CandidateID, rf.me)
+			return
+		}
+	}
+	vote()
 	// Your code here (3A, 3B).
 }
 
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	DPrintf("%d向%d号发送了投票请求", rf.me, server)
+	ok := rf.sendRPC(server, "Raft.RequestVote", args, reply)
+	if ok {
+		DPrintf("%d向%d号请求投票成功", rf.me, server)
+	} else {
+		DPrintf("%d向%d号请求投票失败", rf.me, server)
+	}
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term int
+}
+
+type AppendEntriesReply struct {
+}
+
+func (rf *Raft) AppendEntries(arg *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.term.Store(int32(arg.Term))
+	rf.lastHeart.Store(time.Now().UnixMilli())
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.sendRPC(server, "Raft.AppendEntries", args, reply)
+	if !ok {
+		DPrintf("%d发送心跳给%d失败", rf.me, server)
+	}
+	return ok
+}
+
+func (rf *Raft) sendHeartBeat() {
+	for rf.isLeader.Load() {
+		var wg sync.WaitGroup
+		var loseConnectNum atomic.Int32
+		DPrintf("%d号开始发送心跳", rf.me)
+		for i := range rf.peers {
+			if i != rf.me {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					arg := &AppendEntriesArgs{Term: int(rf.term.Load())}
+					reply := &AppendEntriesReply{}
+					if ok := rf.sendAppendEntries(i, arg, reply); !ok {
+						loseConnectNum.Add(1)
+					}
+				}(i)
+			}
+		}
+		wg.Wait()
+		if int(loseConnectNum.Load()) >= len(rf.peers)-1 { // 如果这个leader除了自己谁都联系不上
+			rf.isLeader.Store(false)
+			DPrintf("%d号Leader已宕机", rf.me)
+			return
+		}
+		time.Sleep(heartBeatInterval)
+	}
+}
+
+func (rf *Raft) loseHeart() bool {
+	if rf.isLeader.Load() {
+		return false
+	}
+	return time.Now().UnixMilli()-rf.lastHeart.Load() > tolerableHeartBeatInterval.Milliseconds()
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -188,13 +255,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
-	isLeader := true
+	DPrintf("%d号Start", rf.me)
 
 	// Your code here (3B).
 
-
-	return index, term, isLeader
+	return index, int(rf.term.Load()), rf.isLeader.Load()
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -208,6 +273,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	rf.isLeader.Store(false)
+	DPrintf("%d号被kill\n", rf.me)
 	// Your code here, if desired.
 }
 
@@ -216,16 +283,45 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+const heartBeatInterval = 100 * time.Millisecond         // 150
+const tolerableHeartBeatInterval = 3 * heartBeatInterval // 5
+
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
-		// Your code here (3A)
-		// Check if a leader election should be started.
-
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		if !rf.loseHeart() { // 没有超过可容忍时间或者此节点是leader就跳过选举
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		DPrintf("%d号开始选举\n", rf.me)
+		rf.isCandidate.Store(true)
+		newterm := int(rf.term.Load() + 1)
+		var vote int
+		for i := range rf.peers {
+			if i == rf.me {
+				vote++
+				continue
+			}
+			arg := &RequestVoteArgs{Term: newterm, CandidateID: rf.me}
+			reply := &RequestVoteReply{}
+			if ok := rf.sendRequestVote(i, arg, reply); !ok {
+				continue
+			}
+			if !reply.GrantVote {
+				vote = 0
+				rf.term.Store(int32(newterm))
+				break
+			}
+			vote++
+		}
+		DPrintf("%d号投票结束", rf.me)
+		if vote > len(rf.peers)/2 {
+			rf.isLeader.Store(true) // 竞选成功,下一步发送心跳
+			rf.term.Store(int32(newterm))
+			go rf.sendHeartBeat()
+			DPrintf("%d号获得了%d票,成为Leader\n", rf.me, vote)
+		}
+		rf.isCandidate.Store(false)
+		ms := 150 + (rand.Int63() % 250)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -245,15 +341,37 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.term.Store(0)
+	rf.isLeader.Store(false)
+	rf.isCandidate.Store(false)
+	rf.lastHeart.Store(time.Now().UnixMilli())
 
 	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
+	rf.initSendRPCPool()
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
-
 	return rf
+}
+
+func (rf *Raft) initSendRPCPool() {
+	rf.sendRPCPool = sync.Pool{New: func() interface{} {
+		ch := make(chan bool, 1)
+		return ch
+	}}
+}
+
+func (rf *Raft) sendRPCPoolGet() chan bool {
+	return rf.sendRPCPool.Get().(chan bool)
+}
+
+func (rf *Raft) sendRPCPoolPut(ch chan bool) {
+	if len(ch) > 0 {
+		<-ch
+	}
+	rf.sendRPCPool.Put(ch)
 }
