@@ -207,9 +207,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendHeartBeat() {
+	var wg sync.WaitGroup
+	var loseConnectNum atomic.Int32
 	for rf.isLeader.Load() {
-		var wg sync.WaitGroup
-		var loseConnectNum atomic.Int32
 		DPrintf("%d号开始发送心跳", rf.me)
 		for i := range rf.peers {
 			if i != rf.me {
@@ -230,6 +230,7 @@ func (rf *Raft) sendHeartBeat() {
 			DPrintf("%d号Leader已宕机", rf.me)
 			return
 		}
+		loseConnectNum.Store(0)
 		time.Sleep(heartBeatInterval)
 	}
 }
