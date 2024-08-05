@@ -49,19 +49,26 @@ type ApplyMsg struct {
 }
 
 type Raft struct {
-	mu          sync.RWMutex        // Lock to protect shared access to this peer's state
-	peers       []*labrpc.ClientEnd // RPC end points of all peers
-	persister   *Persister          // Object to hold this peer's persisted state
-	me          int                 // this peer's index into peers[]
-	dead        int32               // set by Kill()
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	applyChan chan ApplyMsg
+
+	me          int         // this peer's index into peers[]
+	dead        atomic.Bool // set by Kill()
 	term        atomic.Int32
 	isLeader    atomic.Bool
 	isCandidate atomic.Bool
 	lastHeart   atomic.Int64 // millisecond
-	sendRPCPool sync.Pool
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+
+	manager           *TaskManager
+	submitTp          int
+	entries           []interface{} // entries
+	readyEntries      []interface{}
+	readyEntriesIndex int
+	nextCommitIndex   atomic.Int32
+	startIndex        atomic.Int32
+	persister         *Persister // Object to hold this peer's persisted state
+	sendRPCPool       sync.Pool
 }
 
 // return currentTerm and whether this server
@@ -114,23 +121,6 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
-}
-
-func (rf *Raft) sendRPC(server int, method string, arg, reply interface{}) bool {
-	timeout := time.After(10 * time.Millisecond)
-	done := rf.sendRPCPoolGet()
-	defer rf.sendRPCPoolPut(done)
-	go func() {
-		done <- rf.peers[server].Call(method, arg, reply)
-	}()
-
-	select {
-	case ok := <-done:
-		return ok
-	case <-timeout:
-		return false
-	}
 }
 
 type RequestVoteArgs struct {
@@ -146,28 +136,25 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	vote := func() {
 		reply.GrantVote = true
-		DPrintf("%d vote to %d\n", rf.me, args.CandidateID)
 	}
 
 	term := int(rf.term.Load())
 	if term > args.Term-1 {
 		reply.GrantVote = false
-		DPrintf("%d号拒绝给%d号投票，因为%d号的term>=arg.Term\n", rf.me, args.CandidateID, rf.me)
 		return
 	}
 	if rf.isLeader.Load() {
 		reply.GrantVote = false
-		DPrintf("%d号拒绝给%d号投票，因为%d号是Leader\n", rf.me, args.CandidateID, rf.me)
 		return
 	}
 	if rf.isCandidate.Load() {
 		if term != args.Term-1 {
+			rf.isCandidate.Store(false)
 			vote()
 			return
 		}
 		if rf.me < args.CandidateID {
 			reply.GrantVote = false
-			DPrintf("%d号拒绝给%d号投票，因为%d的序列更靠前\n", rf.me, args.CandidateID, rf.me)
 			return
 		}
 	}
@@ -176,58 +163,96 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf("%d向%d号发送了投票请求", rf.me, server)
-	ok := rf.sendRPC(server, "Raft.RequestVote", args, reply)
-	if ok {
-		DPrintf("%d向%d号请求投票成功", rf.me, server)
-	} else {
-		DPrintf("%d向%d号请求投票失败", rf.me, server)
-	}
-	return ok
+	return rf.sendRPC(server, "Raft.RequestVote", args, reply)
 }
 
 type AppendEntriesArgs struct {
-	Term int
+	Term              int
+	Entries           []interface{}
+	LeaderCommitIndex int
+	Replenish         bool
 }
 
 type AppendEntriesReply struct {
+	Success            bool
+	ExpectEntriesStart int
 }
 
 func (rf *Raft) AppendEntries(arg *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.term.Store(int32(arg.Term))
 	rf.lastHeart.Store(time.Now().UnixMilli())
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.sendRPC(server, "Raft.AppendEntries", args, reply)
-	if !ok {
-		DPrintf("%d发送心跳给%d失败", rf.me, server)
+	if rf.isLeader.Load() {
+		if int(rf.nextCommitIndex.Load()) < arg.LeaderCommitIndex {
+			rf.isLeader.Store(false)
+		}
 	}
-	return ok
+	reply.Success = true
+	if arg.LeaderCommitIndex > int(rf.nextCommitIndex.Load()) && !arg.Replenish { // commit
+		if len(rf.entries)+len(rf.readyEntries) < arg.LeaderCommitIndex {
+			DPrintf("Follower: %d lost connect sometime, and it try to reconn", rf.me)
+			reply.Success = false
+			reply.ExpectEntriesStart = len(rf.entries)
+			return
+		}
+		rf.entries = append(rf.entries, rf.readyEntries...)
+		rf.readyEntries = nil
+		for i := int(rf.nextCommitIndex.Load()); i < arg.LeaderCommitIndex; i++ {
+			rf.sendMsg(nil, true, rf.entries[i], i+1)()
+		}
+		rf.nextCommitIndex.Store(int32(arg.LeaderCommitIndex))
+	}
+	if arg.Entries == nil {
+		return
+	}
+	if rf.dead.Load() {
+		reply.Success = false // 不会再尝试重复发送请求
+		return
+	}
+	rf.readyEntries = make([]interface{}, len(arg.Entries))
+	copy(rf.readyEntries, arg.Entries)
+
+	DPrintf("Follower: %d have record a command: %v, index: %d", rf.me, arg.Entries, rf.nextCommitIndex.Load())
 }
 
 func (rf *Raft) sendHeartBeat() {
-	var wg sync.WaitGroup
-	var loseConnectNum atomic.Int32
 	for rf.isLeader.Load() {
-		DPrintf("%d号开始发送心跳", rf.me)
+		var loseConnectNum atomic.Int32
+		var wg sync.WaitGroup
+		fn := func(server int) func() {
+			return func() {
+				defer wg.Done()
+				arg := &AppendEntriesArgs{Term: int(rf.term.Load()), Entries: nil, LeaderCommitIndex: int(rf.nextCommitIndex.Load()), Replenish: false}
+				reply := &AppendEntriesReply{Success: false, ExpectEntriesStart: -1}
+				if !rf.sendRPC(server, "Raft.AppendEntries", arg, reply, 20*time.Millisecond) {
+					loseConnectNum.Add(1)
+					return
+				}
+				if !reply.Success {
+					if reply.ExpectEntriesStart != -1 {
+						rf.mu.Lock()
+						arg.Entries = rf.entries[reply.ExpectEntriesStart:len(rf.entries)]
+						arg.Replenish = true
+						rf.mu.Unlock()
+						rf.sendRPC(server, "Raft.AppendEntries", arg, reply)
+					}
+					return
+				}
+			}
+		}
+
 		for i := range rf.peers {
 			if i != rf.me {
+				i := i
 				wg.Add(1)
-				go func(i int) {
-					defer wg.Done()
-					arg := &AppendEntriesArgs{Term: int(rf.term.Load())}
-					reply := &AppendEntriesReply{}
-					if ok := rf.sendAppendEntries(i, arg, reply); !ok {
-						loseConnectNum.Add(1)
-					}
-				}(i)
+				rf.manager.AddTask(RandomQueue, fn(i))
 			}
 		}
 		wg.Wait()
 		if int(loseConnectNum.Load()) >= len(rf.peers)-1 { // 如果这个leader除了自己谁都联系不上
 			rf.isLeader.Store(false)
-			DPrintf("%d号Leader已宕机", rf.me)
+			//log.Printf("Leader: %d lost because of loseConnectNum count is %d", rf.me, loseConnectNum.Load())
 			return
 		}
 		loseConnectNum.Store(0)
@@ -242,6 +267,70 @@ func (rf *Raft) loseHeart() bool {
 	return time.Now().UnixMilli()-rf.lastHeart.Load() > tolerableHeartBeatInterval.Milliseconds()
 }
 
+func (rf *Raft) submitLog(command interface{}) func() {
+	sucCount := atomic.Int32{}
+	sucCount.Store(1)
+	wg := sync.WaitGroup{}
+	fn := func(i int) {
+		defer wg.Done()
+		arg := &AppendEntriesArgs{Term: int(rf.term.Load()), Entries: []interface{}{command}, LeaderCommitIndex: int(rf.nextCommitIndex.Load()), Replenish: false}
+		reply := &AppendEntriesReply{Success: false, ExpectEntriesStart: -1}
+		if !rf.sendRPC(i, "Raft.AppendEntries", arg, reply, 20*time.Millisecond) {
+			rf.retryAppend(i, 3, arg, reply)
+			return
+		}
+		if !reply.Success {
+			if reply.ExpectEntriesStart != -1 {
+				rf.mu.Lock()
+				arg.Entries = rf.entries[reply.ExpectEntriesStart:len(rf.entries)]
+				arg.Replenish = true
+				rf.mu.Unlock()
+				if rf.sendRPC(i, "Raft.AppendEntries", arg, reply) && reply.Success {
+					sucCount.Add(1)
+				}
+			}
+			return
+		}
+		sucCount.Add(1)
+	}
+
+	return func() {
+		rf.mu.Lock()
+		rf.entries = append(rf.entries, command)
+		rf.mu.Unlock()
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			wg.Add(1)
+			server := i
+			go fn(server)
+		}
+		wg.Wait()
+		if int(sucCount.Load()) <= len(rf.peers)/2 {
+			rf.entries = rf.entries[:len(rf.entries)-1]
+			rf.startIndex.Add(-1)
+			rf.isLeader.Store(false)               // 失去足够的连接,也保证了entry是一条一条添加的,如果还有节点存活,包括本leader在内,仍然保有这次未完成的entry
+			rf.manager.ClearTaskQueue(rf.submitTp) // 取消后面的任务,避免不必要的开销,以及可能导致的歧义
+			DPrintf("Leader: %d have lose heart", rf.me)
+			return
+		}
+		rf.sendMsg(nil, true, rf.entries[int(rf.nextCommitIndex.Load())], int(rf.nextCommitIndex.Load())+1)()
+		rf.nextCommitIndex.Add(1)
+		DPrintf("Leader: %d have commit one command:%v, index:%d ,sucCount: %d\n", rf.me, command, rf.nextCommitIndex.Load(), sucCount.Load())
+	}
+}
+
+func (rf *Raft) retryAppend(server int, retryTimes int, arg, reply interface{}) bool {
+	for i := 0; i < retryTimes; i++ {
+		arg1, reply1 := arg, reply
+		if rf.sendRPC(server, "Raft.AppendEntries", arg1, reply1, 20*time.Millisecond) {
+			return true
+		}
+	}
+	return false
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -249,18 +338,19 @@ func (rf *Raft) loseHeart() bool {
 // command will ever be committed to the Raft log, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command interface{}) (int, int, bool) { // commitIndex,currentTerm,isLeader
 	index := -1
-	DPrintf("%d号Start", rf.me)
+	term := int(rf.term.Load())
+	if !rf.isLeader.Load() || rf.dead.Load() {
+		return index, term, false
+	}
+	rf.mu.Lock()
+	rf.manager.AddTask(rf.submitTp, rf.submitLog(command))
+	rf.mu.Unlock()
 
-	// Your code here (3B).
-
-	return index, int(rf.term.Load()), rf.isLeader.Load()
+	index = int(rf.startIndex.Load()) + 1
+	rf.startIndex.Add(1)
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -273,18 +363,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
+	rf.dead.Store(true)
 	rf.isLeader.Store(false)
-	DPrintf("%d号被kill\n", rf.me)
 	// Your code here, if desired.
 }
 
 func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
+	return rf.dead.Load()
 }
 
-const heartBeatInterval = 100 * time.Millisecond         // 150
+const heartBeatInterval = 150 * time.Millisecond         // 150
 const tolerableHeartBeatInterval = 3 * heartBeatInterval // 5
 
 func (rf *Raft) ticker() {
@@ -293,7 +381,6 @@ func (rf *Raft) ticker() {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		DPrintf("%d号开始选举\n", rf.me)
 		rf.isCandidate.Store(true)
 		newterm := int(rf.term.Load() + 1)
 		var vote int
@@ -307,19 +394,22 @@ func (rf *Raft) ticker() {
 			if ok := rf.sendRequestVote(i, arg, reply); !ok {
 				continue
 			}
-			if !reply.GrantVote {
+			rf.mu.Lock()
+			if !reply.GrantVote || !rf.isCandidate.Load() {
 				vote = 0
 				rf.term.Store(int32(newterm))
+				rf.mu.Unlock()
 				break
 			}
+			rf.mu.Unlock()
 			vote++
 		}
-		DPrintf("%d号投票结束", rf.me)
 		if vote > len(rf.peers)/2 {
+			//log.Printf("Leader: %d 成为Leader", rf.me)
 			rf.isLeader.Store(true) // 竞选成功,下一步发送心跳
 			rf.term.Store(int32(newterm))
+			rf.startIndex.Store(rf.nextCommitIndex.Load())
 			go rf.sendHeartBeat()
-			DPrintf("%d号获得了%d票,成为Leader\n", rf.me, vote)
 		}
 		rf.isCandidate.Store(false)
 		ms := 150 + (rand.Int63() % 250)
@@ -342,11 +432,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.dead.Store(false)
 	rf.term.Store(0)
 	rf.isLeader.Store(false)
 	rf.isCandidate.Store(false)
 	rf.lastHeart.Store(time.Now().UnixMilli())
 
+	rf.manager = NewTaskManager(10)
+	rf.submitTp = rf.manager.NewTaskType()
+	rf.entries = make([]interface{}, 0)
+	rf.nextCommitIndex.Store(0)
+	rf.startIndex.Store(0)
+	rf.applyChan = applyCh
+	rf.manager.AddTask(RandomQueue, rf.sendMsg(new(ApplyMsg), true, nil, 0))
 	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
@@ -359,20 +457,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) initSendRPCPool() {
-	rf.sendRPCPool = sync.Pool{New: func() interface{} {
-		ch := make(chan bool, 1)
-		return ch
-	}}
-}
-
-func (rf *Raft) sendRPCPoolGet() chan bool {
-	return rf.sendRPCPool.Get().(chan bool)
-}
-
-func (rf *Raft) sendRPCPoolPut(ch chan bool) {
-	if len(ch) > 0 {
-		<-ch
+// sendMsg will build a ApplyMsg across the
+// arguments which you passed, if msg is nil,
+func (rf *Raft) sendMsg(msg *ApplyMsg, valid bool, cmd interface{}, cmdI int) func() {
+	if msg == nil {
+		msg = &ApplyMsg{
+			CommandValid:  valid,
+			Command:       cmd,
+			CommandIndex:  cmdI,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
 	}
-	rf.sendRPCPool.Put(ch)
+	return func() {
+		rf.applyChan <- *msg
+	}
 }

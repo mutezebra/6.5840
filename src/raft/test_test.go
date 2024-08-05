@@ -387,6 +387,7 @@ loop:
 					return
 				}
 				is <- i
+				DPrintf("[TEST]: 1 put %d to is", i)
 			}(ii)
 		}
 
@@ -404,6 +405,7 @@ loop:
 		cmds := []int{}
 		for index := range is {
 			cmd := cfg.wait(index, servers, term)
+			DPrintf("[TEST]: 2 index is %d, cmd is %v", index, cmd)
 			if ix, ok := cmd.(int); ok {
 				if ix == -1 {
 					// peers have moved on to later terms
@@ -468,7 +470,6 @@ func TestRejoin3B(t *testing.T) {
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
-
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
 
@@ -480,7 +481,7 @@ func TestRejoin3B(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(104, 2, true)
-
+	DPrintf("have commited 104")
 	// all together now
 	cfg.connect(leader2)
 
