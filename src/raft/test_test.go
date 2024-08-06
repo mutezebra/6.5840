@@ -481,7 +481,6 @@ func TestRejoin3B(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(104, 2, true)
-	DPrintf("have commited 104")
 	// all together now
 	cfg.connect(leader2)
 

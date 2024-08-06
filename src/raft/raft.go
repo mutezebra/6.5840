@@ -137,7 +137,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	vote := func() {
 		reply.GrantVote = true
 	}
-
 	term := int(rf.term.Load())
 	if term > args.Term-1 {
 		reply.GrantVote = false
@@ -159,7 +158,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	vote()
-	// Your code here (3A, 3B).
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
@@ -179,23 +177,24 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(arg *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.term.Store(int32(arg.Term))
 	rf.lastHeart.Store(time.Now().UnixMilli())
-	if rf.isLeader.Load() {
+	if rf.isLeader.Load() { // 如果我是leader,但还是接收到了请求，那说明还存在其他Leader
 		if int(rf.nextCommitIndex.Load()) < arg.LeaderCommitIndex {
 			rf.isLeader.Store(false)
 		}
 	}
 	reply.Success = true
-	if arg.LeaderCommitIndex > int(rf.nextCommitIndex.Load()) && !arg.Replenish { // commit
-		if len(rf.entries)+len(rf.readyEntries) < arg.LeaderCommitIndex {
-			DPrintf("Follower: %d lost connect sometime, and it try to reconn", rf.me)
+
+	rf.mu.Lock() // 避免同时处理多个AppendEntries
+	defer rf.mu.Unlock()
+	if arg.LeaderCommitIndex > int(rf.nextCommitIndex.Load()) && !arg.Replenish { // 如果arg的index更大，那说明需要commit了
+		if len(rf.entries)+len(rf.readyEntries) < arg.LeaderCommitIndex { // 如果commit的entries和准备提交的entries加起来数目对不上，那就说明缺失了一部分
 			reply.Success = false
 			reply.ExpectEntriesStart = len(rf.entries)
 			return
 		}
+		// 如果没有缺少数据的话，就commit
 		rf.entries = append(rf.entries, rf.readyEntries...)
 		rf.readyEntries = nil
 		for i := int(rf.nextCommitIndex.Load()); i < arg.LeaderCommitIndex; i++ {
@@ -206,45 +205,35 @@ func (rf *Raft) AppendEntries(arg *AppendEntriesArgs, reply *AppendEntriesReply)
 	if arg.Entries == nil {
 		return
 	}
-	if rf.dead.Load() {
-		reply.Success = false // 不会再尝试重复发送请求
-		return
-	}
+	// Leader发送了一个或多个新的cmd,将其设置为预提交
 	rf.readyEntries = make([]interface{}, len(arg.Entries))
 	copy(rf.readyEntries, arg.Entries)
-
-	DPrintf("Follower: %d have record a command: %v, index: %d", rf.me, arg.Entries, rf.nextCommitIndex.Load())
 }
 
 func (rf *Raft) sendHeartBeat() {
-	for rf.isLeader.Load() {
-		var loseConnectNum atomic.Int32
-		var wg sync.WaitGroup
-		fn := func(server int) func() {
-			return func() {
-				defer wg.Done()
-				arg := &AppendEntriesArgs{Term: int(rf.term.Load()), Entries: nil, LeaderCommitIndex: int(rf.nextCommitIndex.Load()), Replenish: false}
-				reply := &AppendEntriesReply{Success: false, ExpectEntriesStart: -1}
-				if !rf.sendRPC(server, "Raft.AppendEntries", arg, reply, 20*time.Millisecond) {
-					loseConnectNum.Add(1)
-					return
+	var loseConnectNum atomic.Int32
+	var wg sync.WaitGroup
+	fn := func(server int) func() {
+		return func() {
+			defer wg.Done()
+			arg := &AppendEntriesArgs{Term: int(rf.term.Load()), Entries: nil, LeaderCommitIndex: int(rf.nextCommitIndex.Load()), Replenish: false}
+			reply := &AppendEntriesReply{Success: false, ExpectEntriesStart: -1}
+			if !rf.sendRPC(server, "Raft.AppendEntries", arg, reply, 20*time.Millisecond) {
+				loseConnectNum.Add(1)
+				return
+			}
+			if !reply.Success {
+				if reply.ExpectEntriesStart != -1 {
+					rf.replenishEntries(server, reply.ExpectEntriesStart, nil)
 				}
-				if !reply.Success {
-					if reply.ExpectEntriesStart != -1 {
-						rf.mu.Lock()
-						arg.Entries = rf.entries[reply.ExpectEntriesStart:len(rf.entries)]
-						arg.Replenish = true
-						rf.mu.Unlock()
-						rf.sendRPC(server, "Raft.AppendEntries", arg, reply)
-					}
-					return
-				}
+				return
 			}
 		}
+	}
 
+	for rf.isLeader.Load() {
 		for i := range rf.peers {
 			if i != rf.me {
-				i := i
 				wg.Add(1)
 				rf.manager.AddTask(RandomQueue, fn(i))
 			}
@@ -252,7 +241,6 @@ func (rf *Raft) sendHeartBeat() {
 		wg.Wait()
 		if int(loseConnectNum.Load()) >= len(rf.peers)-1 { // 如果这个leader除了自己谁都联系不上
 			rf.isLeader.Store(false)
-			//log.Printf("Leader: %d lost because of loseConnectNum count is %d", rf.me, loseConnectNum.Load())
 			return
 		}
 		loseConnectNum.Store(0)
@@ -279,15 +267,11 @@ func (rf *Raft) submitLog(command interface{}) func() {
 			rf.retryAppend(i, 3, arg, reply)
 			return
 		}
-		if !reply.Success {
-			if reply.ExpectEntriesStart != -1 {
-				rf.mu.Lock()
-				arg.Entries = rf.entries[reply.ExpectEntriesStart:len(rf.entries)]
-				arg.Replenish = true
-				rf.mu.Unlock()
-				if rf.sendRPC(i, "Raft.AppendEntries", arg, reply) && reply.Success {
+		if !reply.Success { // 如果没有成功
+			if reply.ExpectEntriesStart != -1 { // 尝试判断是不是因为缺失数据导致的失败，如果是,那就补齐
+				rf.replenishEntries(i, reply.ExpectEntriesStart, func() { // 发送缺失的数据
 					sucCount.Add(1)
-				}
+				})
 			}
 			return
 		}
@@ -299,36 +283,52 @@ func (rf *Raft) submitLog(command interface{}) func() {
 		rf.entries = append(rf.entries, command)
 		rf.mu.Unlock()
 		for i := range rf.peers {
-			if i == rf.me {
-				continue
+			if i != rf.me {
+				wg.Add(1)
+				server := i
+				go fn(server)
 			}
-			wg.Add(1)
-			server := i
-			go fn(server)
 		}
 		wg.Wait()
 		if int(sucCount.Load()) <= len(rf.peers)/2 {
+			rf.mu.Lock()
 			rf.entries = rf.entries[:len(rf.entries)-1]
+			rf.mu.Unlock()
 			rf.startIndex.Add(-1)
 			rf.isLeader.Store(false)               // 失去足够的连接,也保证了entry是一条一条添加的,如果还有节点存活,包括本leader在内,仍然保有这次未完成的entry
 			rf.manager.ClearTaskQueue(rf.submitTp) // 取消后面的任务,避免不必要的开销,以及可能导致的歧义
-			DPrintf("Leader: %d have lose heart", rf.me)
 			return
 		}
 		rf.sendMsg(nil, true, rf.entries[int(rf.nextCommitIndex.Load())], int(rf.nextCommitIndex.Load())+1)()
 		rf.nextCommitIndex.Add(1)
-		DPrintf("Leader: %d have commit one command:%v, index:%d ,sucCount: %d\n", rf.me, command, rf.nextCommitIndex.Load(), sucCount.Load())
 	}
 }
 
 func (rf *Raft) retryAppend(server int, retryTimes int, arg, reply interface{}) bool {
 	for i := 0; i < retryTimes; i++ {
 		arg1, reply1 := arg, reply
-		if rf.sendRPC(server, "Raft.AppendEntries", arg1, reply1, 20*time.Millisecond) {
+		if rf.sendRPC(server, "Raft.AppendEntries", arg1, reply1, 10*time.Millisecond) {
 			return true
 		}
 	}
 	return false
+}
+
+func (rf *Raft) replenishEntries(server int, startIndex int, callback func()) {
+	arg := &AppendEntriesArgs{
+		Term:              int(rf.term.Load()),
+		LeaderCommitIndex: int(rf.nextCommitIndex.Load()),
+		Replenish:         true,
+	}
+	reply := &AppendEntriesReply{}
+	rf.mu.Lock()
+	arg.Entries = rf.entries[startIndex:len(rf.entries)]
+	rf.mu.Unlock()
+	if rf.sendRPC(server, "Raft.AppendEntries", arg, reply, 30*time.Millisecond) && reply.Success {
+		if callback != nil {
+			callback()
+		}
+	}
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -347,7 +347,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // commitIndex,cur
 	rf.mu.Lock()
 	rf.manager.AddTask(rf.submitTp, rf.submitLog(command))
 	rf.mu.Unlock()
-
 	index = int(rf.startIndex.Load()) + 1
 	rf.startIndex.Add(1)
 	return index, term, true
@@ -405,7 +404,6 @@ func (rf *Raft) ticker() {
 			vote++
 		}
 		if vote > len(rf.peers)/2 {
-			//log.Printf("Leader: %d 成为Leader", rf.me)
 			rf.isLeader.Store(true) // 竞选成功,下一步发送心跳
 			rf.term.Store(int32(newterm))
 			rf.startIndex.Store(rf.nextCommitIndex.Load())
