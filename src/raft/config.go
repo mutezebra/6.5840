@@ -378,7 +378,6 @@ func (cfg *config) connect(i int) {
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
-	DPrintf("disconect(%d)", i)
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -620,6 +619,7 @@ func (cfg *config) begin(description string) {
 // print the Passed message,
 // and some performance numbers.
 func (cfg *config) end() {
+	PrintAllLog(cfg.logs)
 	cfg.checkTimeout()
 	if cfg.t.Failed() == false {
 		cfg.mu.Lock()

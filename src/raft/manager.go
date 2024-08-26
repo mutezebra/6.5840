@@ -39,6 +39,7 @@ type taskType int // start from 0
 
 const (
 	RandomQueue int = -1
+	ClearAll    int = -2
 )
 
 func (m *TaskManager) NewTaskType() int {
@@ -71,6 +72,16 @@ func (m *TaskManager) AddTask(tp int, f ...func()) {
 }
 
 func (m *TaskManager) ClearTaskQueue(tp int) {
+	if tp == ClearAll {
+		ts := make([]task, 0)
+		m.mu.Lock()
+		for k := range m.tasks {
+			m.tasks[k] = ts
+		}
+		m.mu.Unlock()
+		return
+	}
+
 	tp2 := taskType(tp)
 	m.mu.Lock()
 	m.tasks[tp2] = make([]task, 0)

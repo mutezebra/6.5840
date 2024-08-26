@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -141,7 +144,6 @@ func TestBasicAgree3B(t *testing.T) {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
 	}
-
 	cfg.end()
 }
 
@@ -595,7 +597,7 @@ loop:
 		leader = cfg.checkOneLeader()
 		total1 = rpcs()
 
-		iters := 10
+		iters := 20
 		starti, term, ok := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
@@ -646,6 +648,7 @@ loop:
 		}
 
 		if total2-total1 > (iters+1+3)*3 {
+			t.Logf("should 小于 %d 个rpc", (iters+1+3)*3)
 			t.Fatalf("too many RPCs (%v) for %v entries\n", total2-total1, iters)
 		}
 
@@ -689,7 +692,17 @@ func TestPersist13C(t *testing.T) {
 		cfg.connect(i)
 	}
 
-	cfg.one(12, servers, true)
+	//leader1 := cfg.checkOneLeader()
+	//
+	//rf := cfg.rafts[leader1]
+	//arg := AppendEntriesArgs{Term: int(rf.term.Load()), Entries: nil, LeaderCommitIndex: int(rf.nextCommitIndex.Load()), Replenish: false}
+	//reply := AppendEntriesReply{Success: false, ExpectEntriesStart: 111}
+	//ok := rf.peers[(leader1+1)%servers].Call("Raft.AppendEntries", &arg, &reply)
+	//log.Println("IN TEST is ok?", ok)
+	//log.Println("IN TEST", reply.ExpectEntriesStart)
+	//time.Sleep(10 * time.Second)
+
+	cfg.one(12, servers, false)
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -727,35 +740,57 @@ func TestPersist23C(t *testing.T) {
 	index := 1
 	for iters := 0; iters < 5; iters++ {
 		cfg.one(10+index, servers, true)
-		index++
+		index++ // 2
 
 		leader1 := cfg.checkOneLeader()
 
 		cfg.disconnect((leader1 + 1) % servers)
+		DPrintf("disconect(%d)", (leader1+1)%servers)
+
 		cfg.disconnect((leader1 + 2) % servers)
+		DPrintf("disconect(%d)", (leader1+2)%servers)
 
 		cfg.one(10+index, servers-2, true)
-		index++
+		index++ // 3
 
 		cfg.disconnect((leader1 + 0) % servers)
+		DPrintf("disconect(%d)", (leader1+0)%servers)
+
 		cfg.disconnect((leader1 + 3) % servers)
+		DPrintf("disconect(%d)", (leader1+3)%servers)
+
 		cfg.disconnect((leader1 + 4) % servers)
+		DPrintf("disconect(%d)", (leader1+4)%servers)
 
 		cfg.start1((leader1+1)%servers, cfg.applier)
+		DPrintf("restart %d", (leader1+1)%servers)
+
 		cfg.start1((leader1+2)%servers, cfg.applier)
+		DPrintf("restart %d", (leader1+2)%servers)
+
 		cfg.connect((leader1 + 1) % servers)
+		DPrintf("conect(%d)", (leader1+1)%servers)
+
 		cfg.connect((leader1 + 2) % servers)
+		DPrintf("conect(%d)", (leader1+2)%servers)
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1+3)%servers, cfg.applier)
+		DPrintf("restart %d", (leader1+3)%servers)
+
 		cfg.connect((leader1 + 3) % servers)
+		DPrintf("connect(%d)", (leader1+3)%servers)
+		DPrintf("WHAT HAPPEN!!!\n\n\n\n")
 
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
+		DPrintf("connect(%d)", (leader1+4)%servers)
+
 		cfg.connect((leader1 + 0) % servers)
+		DPrintf("connect(%d)", (leader1+0)%servers)
 	}
 
 	cfg.one(1000, servers, true)
@@ -807,38 +842,45 @@ func TestFigure83C(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (3C): Figure 8")
-
 	cfg.one(rand.Int(), 1, true)
-
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
-		for i := 0; i < servers; i++ {
+		var count int
+		for i := 0; i < servers; i++ { // 找到leader
 			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(rand.Int())
+				v := rand.Int()
+				_, _, ok := cfg.rafts[i].Start(v) // 尝试start
 				if ok {
+					DPrintf("Leader: %d 开始发送command: %v", i, v)
 					leader = i
+					count++
 				}
 			}
+			if count > 1 {
+				log.Fatalf("[!!!!] 不只有一个leader")
+			}
 		}
-
-		if (rand.Int() % 1000) < 100 {
+		// 小概率提交，大概率提交前崩溃
+		if (rand.Int() % 1000) < 100 { //10 分之一概率 休眠不超过 500 ms。基本上已经提交了。
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		} else {
-			ms := (rand.Int63() % 13)
+			ms := (rand.Int63() % 13) // 休眠不超过 13 ms。大概率还没提交
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
 		if leader != -1 {
-			cfg.crash1(leader)
-			nup -= 1
+			cfg.crash1(leader) // kill 一个 leader。
+			DPrintf("crash %d", leader)
+			nup -= 1 // 剩余数量 -1
 		}
 
-		if nup < 3 {
+		if nup < 3 { // 如果少于大多数了,那么会尝试重启一个被kill的
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
 				cfg.start1(s, cfg.applier)
+				DPrintf("重启 %d", s)
 				cfg.connect(s)
 				nup += 1
 			}
@@ -851,7 +893,7 @@ func TestFigure83C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
+	log.Println("is ok ok ok ok")
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
@@ -1267,3 +1309,36 @@ func TestSnapshotInit3D(t *testing.T) {
 	cfg.one(rand.Int(), servers, true)
 	cfg.end()
 }
+
+/*
+type MyTestStruct struct {
+	Name   string
+	Age    int
+	Gender string
+}
+
+func TestMyTest5E(t *testing.T) {
+	m1 := MyTestStruct{
+		Name:   "m1",
+		Age:    10,
+		Gender: "男",
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(m1.Age)
+	e.Encode(m1.Name)
+	e.Encode(m1.Gender)
+	buf := w.Bytes()
+
+	r := bytes.NewBuffer(buf)
+	d := labgob.NewDecoder(r)
+	age, name, gender := 0, "", ""
+	if d.Decode(&age) != nil ||
+		d.Decode(&name) != nil ||
+		d.Decode(&gender) != nil {
+		log.Printf("decode failed")
+	} else {
+		log.Println(age, name, gender)
+	}
+}
+*/

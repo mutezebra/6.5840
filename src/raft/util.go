@@ -13,12 +13,22 @@ import (
 
 // Debugging
 const Debug = false
+const AllLog = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
 }
+
+func PrintAllLog(m []map[int]interface{}) {
+	if AllLog {
+		for i := range m {
+			fmt.Println("Member: ", i, "have log length: ", len(m[i]), "logs: ", m[i])
+		}
+	}
+}
+
 func retryFunc(retryTimes int, fn func() bool) func() {
 	return func() {
 		for i := 0; i < retryTimes; i++ {
@@ -75,28 +85,15 @@ func (rf *Raft) sendRPC(server int, method string, arg, reply interface{}, timeo
 	over := atomic.Bool{}
 	over.Store(false)
 	go func() {
-		//id.Store(int32(getGID()))
 		ok := rf.peers[server].Call(method, arg, reply)
 		if !over.Load() {
 			done <- ok
 		}
-		//ok := <-done
-		//if !over.Load() {
-		//	done <- ok
-		//}
-		//suc := "失败"
-		//if ok {
-		//	suc = "成功"
-		//}
-		//DPrintf("in %d goroutine, 调用 %s", id.Load(), suc)
-
 	}()
 	select {
 	case ok := <-done:
-		//time.Sleep(1000 * time.Microsecond) // waiting for goroutine destroy
 		return ok
 	case <-to:
-		//DPrintf("id为 %d的goroutine超时", id.Load())
 		over.Store(true)
 		return false
 	}
