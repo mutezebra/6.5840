@@ -1,19 +1,23 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "testing"
-import "os"
+import (
+	"6.5840/labrpc"
+	"testing"
+	"os"
+)
 
-//import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "fmt"
-import "time"
-import "sync/atomic"
+// import "log"
+import (
+	crand "crypto/rand"
+	"math/big"
+	"math/rand"
+	"encoding/base64"
+	"sync"
+	"runtime"
+	"fmt"
+	"time"
+	"sync/atomic"
+)
 
 const SERVERID = 0
 
@@ -91,7 +95,7 @@ func (cfg *config) deleteClient(ck *Clerk) {
 
 // caller should hold cfg.mu
 func (cfg *config) ConnectClientUnlocked(ck *Clerk) {
-	//log.Printf("ConnectClient %v\n", ck)
+	// log.Printf("ConnectClient %v\n", ck)
 	endname := cfg.clerks[ck]
 	cfg.net.Enable(endname, true)
 }

@@ -1,6 +1,7 @@
 package kvsrv
 
 import (
+	"fmt"
 	"log"
 	"sync"
 )
@@ -23,52 +24,54 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
 	if v, ok := kv.kvs[args.Key]; ok {
 		reply.Value = v
+		kv.mu.Unlock()
 		DPrintf("key:%s is exist,value:%s\n", args.Key, v)
 		return
 	}
 
-	DPrintf("key: %s is not exist\n", args.Key)
-	reply.Value = ""
+	kv.mu.Unlock()
+	DPrintf("key:%s is not exist\n", args.Key)
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if kv.taskHaveDone(args.TaskID) {
+		kv.mu.Unlock()
 		return
 	}
 
-	DPrintf("put key:%s value: %s\n", args.Key, args.Value)
 	kv.kvs[args.Key] = args.Value
 	kv.updateLastTaskID(args.TaskID)
+	kv.mu.Unlock()
+	DPrintf("put key:%s value: %s\n", args.Key, args.Value)
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if kv.taskHaveDone(args.TaskID) {
 		reply.Value = kv.tid2Value[args.TaskID]
+		kv.mu.Unlock()
 		return
 	}
 
 	DPrintf("append key:%s value: %s\n", args.Key, args.Value)
 	if v, ok := kv.kvs[args.Key]; ok {
 		reply.Value = v
-		kv.tid2Value[args.TaskID] = reply.Value
-		v = v + args.Value
-		kv.kvs[args.Key] = v
+		kv.tid2Value[args.TaskID] = v
+		kv.kvs[args.Key] = fmt.Sprintf("%s%s", v, args.Value)
 		kv.updateLastTaskID(args.TaskID)
+		kv.mu.Unlock()
 		return
 	}
 
 	reply.Value = ""
-	kv.tid2Value[args.TaskID] = reply.Value
+	kv.tid2Value[args.TaskID] = ""
 	kv.kvs[args.Key] = args.Value
 	kv.updateLastTaskID(args.TaskID)
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Close(arg *CloseArgs, reply *CloseArgs) {

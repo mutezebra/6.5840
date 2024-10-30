@@ -15,8 +15,7 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key    string
-	TaskID int64
+	Key string
 	// You'll have to add definitions here.
 }
 
@@ -28,5 +27,4 @@ type CloseArgs struct {
 	TaskID int64
 }
 
-type CloseReply struct {
-}
+type CloseReply struct{}

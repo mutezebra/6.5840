@@ -1,12 +1,13 @@
 package kvsrv
 
 import (
-	"6.5840/labrpc"
+	"crypto/rand"
+	"math/big"
 	"sync"
 	"time"
+
+	"6.5840/labrpc"
 )
-import "crypto/rand"
-import "math/big"
 
 type Clerk struct {
 	server *labrpc.ClientEnd
@@ -35,39 +36,38 @@ func (ck *Clerk) getTaskID() int64 {
 }
 
 func (ck *Clerk) Get(key string) string {
-	arg := &GetArgs{Key: key, TaskID: ck.getTaskID()}
+	arg := &GetArgs{Key: key}
 	reply := &GetReply{}
 
 	ck.mu.Lock()
 	for !ck.server.Call("KVServer.Get", arg, reply) {
 	}
 	ck.mu.Unlock()
+
 	return reply.Value
 }
 
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	arg := &PutAppendArgs{Key: key, Value: value, TaskID: ck.getTaskID()}
 	reply := &PutAppendReply{}
+
 	if op == "Put" {
 		ck.mu.Lock()
-
 		for !ck.server.Call("KVServer.Put", arg, reply) {
 		}
 		for !ck.server.Call("KVServer.Close", &CloseArgs{TaskID: arg.TaskID}, &CloseReply{}) {
 		}
 		ck.mu.Unlock()
-		return ""
-	}
-	if op == "Append" {
+	} else if op == "Append" {
 		ck.mu.Lock()
 		for !ck.server.Call("KVServer.Append", arg, reply) {
 		}
 		for !ck.server.Call("KVServer.Close", &CloseArgs{TaskID: arg.TaskID}, &CloseReply{}) {
 		}
 		ck.mu.Unlock()
-		return reply.Value
 	}
-	return ""
+
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {

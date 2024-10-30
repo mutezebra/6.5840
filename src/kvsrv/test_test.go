@@ -1,9 +1,6 @@
 package kvsrv
 
 import (
-	"6.5840/models"
-	"6.5840/porcupine"
-
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -15,6 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"6.5840/models"
+	"6.5840/porcupine"
 )
 
 const linearizabilityCheckTimeout = 1 * time.Second
@@ -113,10 +113,10 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 		ca[cli] = make(chan bool)
 		go run_client(t, cfg, cli, ca[cli], fn)
 	}
-	//log.Printf("spawn_clients_and_wait: waiting for clients")
+	// log.Printf("spawn_clients_and_wait: waiting for clients")
 	for cli := 0; cli < ncli; cli++ {
 		ok := <-ca[cli]
-		//log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
+		// log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
 		if ok == false {
 			t.Fatalf("failure")
 		}
@@ -225,7 +225,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < NITER; i++ {
-		//log.Printf("Iteration %v\n", i)
+		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
 			j := 0
@@ -245,7 +245,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 				}
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
-					//log.Printf("%d: client new append %v\n", cli, nv)
+					// log.Printf("%d: client new append %v\n", cli, nv)
 					l := Append(cfg, myck, key, nv, opLog, cli)
 					if !randomkeys {
 						if j > 0 {
@@ -266,7 +266,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
-					//log.Printf("%d: client new get %v\n", cli, key)
+					// log.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
@@ -286,7 +286,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
 			key := strconv.Itoa(i)
-			//log.Printf("Check %v for client %d\n", j, i)
+			// log.Printf("Check %v for client %d\n", j, i)
 			v := Get(cfg, ck, key, opLog, 0)
 			if !randomkeys {
 				checkClntAppends(t, i, v, j)
@@ -471,7 +471,7 @@ func TestMemPutManyClients(t *testing.T) {
 	v := randValue(MEM)
 
 	cks := make([]*Clerk, NCLIENT)
-	for i, _ := range cks {
+	for i := range cks {
 		cks[i] = cfg.makeClient()
 	}
 
@@ -524,7 +524,7 @@ func TestMemGetManyClients(t *testing.T) {
 	cfg.deleteClient(ck)
 
 	cks := make([]*Clerk, NCLIENT)
-	for i, _ := range cks {
+	for i := range cks {
 		cks[i] = cfg.makeClient()
 	}
 
