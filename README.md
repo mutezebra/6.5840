@@ -35,3 +35,58 @@ Lab1主要有两个角色：coordinator 与 worker，worker 主动的向 coordin
 
 ```
 
+## LAB 2
+
+[任务地址](https://pdos.csail.mit.edu/6.824/labs/lab-kvsrv1.html#:~:text=%E8%AF%A5%E6%9C%8D%E5%8A%A1%E5%99%A8%E5%8F%AF%E7%A1%AE%E4%BF%9D%E6%AF%8F%E4%B8%AA%20Put%20%E6%93%8D%E4%BD%9C%E5%9C%A8%E7%BD%91%E7%BB%9C%E5%87%BA%E7%8E%B0%E6%95%85%E9%9A%9C%E6%97%B6%E6%9C%80%E5%A4%9A%E5%8F%AA%E6%89%A7%E8%A1%8C%E4%B8%80%E6%AC%A1%EF%BC%8C%E5%B9%B6%E4%B8%94%E6%93%8D%E4%BD%9C%E6%98%AF%E5%8F%AF%E7%BA%BF%E6%80%A7%E5%8C%96%E7%9A%84%E3%80%82%E4%BD%A0%E5%B0%86%E4%BD%BF%E7%94%A8%E6%AD%A4%E9%94%AE%E5%80%BC%E6%9C%8D%E5%8A%A1%E5%99%A8%E6%9D%A5%E5%AE%9E%E7%8E%B0%E4%B8%80%E4%B8%AA%E9%94%81%E3%80%82%E5%90%8E%E7%BB%AD%E5%AE%9E%E9%AA%8C%E5%B0%86%E5%A4%8D%E5%88%B6%E8%BF%99%E6%A0%B7%E7%9A%84%E6%9C%8D%E5%8A%A1%E5%99%A8%E4%BB%A5%E5%A4%84%E7%90%86%E6%9C%8D%E5%8A%A1%E5%99%A8%E5%B4%A9%E6%BA%83%E7%9A%84%E6%83%85%E5%86%B5%E3%80%82)
+
+[博客地址](https://mutezebra.github.io/blog/posts/)
+
+### 实现思路
+
+#### 任务描述
+
+此 LAB 比较适合使用增量模型一步一步来，所以实现思路也根据任务的不同要求一步一步递进。
+
+当你看到这里时默认你已经看过了任务描述，这里再简单复述一下。我们需要构建一个 KVServer，以及一个 Clerk，Clerk 可以放松两个请求，Get 和 Put，前者试图获取一个key 的 value，后者通过 version 的值来尝试进行 kv 的创建或者更新。
+
+#### 构建一个基本的 KVServer
+
+像前一个 LAB 一样，为了方便起见我们自定义一个结构体来存储 kv 和 version。如下：
+
+```go
+type Item struct {
+  K,V string
+  Version rpc.Tversion
+}
+```
+
+那对于我们的 server 来讲，我们自然是需要一个变量来存放item，并且最好能够快速的获取和更新结果，那根据这种需求，我们自然可以想到使用 map，并且在 map 中存放指针而不是值对象，就可以方便快速的获取以及更新对象。此外，我们还需要一个锁，以此来避免可能会有的数据竞争问题，避免一个 rpc 在操作某一个 key，另一个 rpc 在读取这个 key，导致冲突。
+
+所以我们的 Server 可以定义如下：
+
+```go
+type KVServer struct {	
+	kvs map[string]*Item
+	mu  sync.Mutex
+}
+
+```
+
+接下来只需要处理逻辑上的问题就好了，没有难点。
+
+你直接去看源代码可能会看到有sync.Map，这是我在假设读多写少的场景下做的优化，相信你可以理解其中的逻辑。
+
+#### 使用键值存储实现锁
+
+对于这个需求一开始我不太理解，看了好一会儿才看懂。大致的意思就是很多个 clerk 共享同一个 key，我们要做的就是基于这个 key 实现一个 clerk（lock）对这个 kv 对的掌控权限，相当于所有权。
+
+那大致的思路就很简单了，我们可以给每一个 lock 一个独一无二的 secret，让他给这个共享的 key 赋值为自己的这个密钥，那对于其他的 lock 而言，通过 get 请求获取到的 value 不是自己的密钥也不为空，那就说明这个 key 此时正在被别的 lock 拥有，那就不断循环尝试判断这个 value 就行了，等到 value 为空的那一刻，也就说明这个 key 被别人释放了，那就可以赋值为自己的 secret，让别人也无法获取。
+
+这里有一个小坑，在上一个任务中，你最好实现了并发安全（线性化）的 kvserver，这里才不会出现什么问题。
+
+前面说了尝试获取 key 的所有权，那获取之后释放也就是一些逻辑上的判断了，比如自己到底有没有获取到锁，没有的话当然就不用释放，如果有的话那直接把 key 的 value 置为空标记为可拥有即可。
+
+下面的任务就很简单了，跳过。
+
+### 补充
+本 lab 所修改的内容都在 `src/kvsrv1` 中，并且文件中含有详细的注释
