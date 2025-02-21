@@ -25,12 +25,12 @@ Lab1主要有两个角色：coordinator 与 worker，worker 主动的向 coordin
 ├── xxx
 ├── mr
 │   ├── constants.go		   // 主要定义一些常量和 format 模板来控制整体的行为
-│   ├── coordinator.go		 // coordinator 设计上的主要实现，包括时期迭代，任务过期与再消费等机制
-│   ├── coordinator_rpc.go // 集中于 rpc 的实现，尽可能的减少于 coordinator.go 的耦合
-│   ├── rpc.go						 // 定义 rpc 请求的参数和方法 
-│   ├── task.go						 // 定义了 task 接口与结构体，方便整个流程的控制 
-│   ├── util.go						 // 一些工具函数
-│   └── worker.go 				 // worker 的实现位置
+│   ├── coordinator.go	   // coordinator 设计上的主要实现，包括时期迭代，任务过期与再消费等机制
+│   ├── coordinator_rpc.go   // 集中于 rpc 的实现，尽可能的减少于 coordinator.go 的耦合
+│   ├── rpc.go			   // 定义 rpc 请求的参数和方法 
+│   ├── task.go			   // 定义了 task 接口与结构体，方便整个流程的控制 
+│   ├── util.go			   // 一些工具函数
+│   └── worker.go 		   // worker 的实现位置
 └── xxx
 
 ```
