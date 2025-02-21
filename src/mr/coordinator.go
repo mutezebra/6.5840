@@ -69,20 +69,6 @@ func (c *Coordinator) suspendTask(item Task) {
 	}
 }
 
-// TryIteration 尝试进行迭代
-func (c *Coordinator) TryIteration() {
-	if len(c.taskCh) != 0 || c.suspendCount.Load() != 0 {
-		return
-	}
-	atomic.AddInt64(&c.period, +1)
-	if c.period == MapPeriod {
-		c.initMapTask()
-	}
-	if c.period == ReducePeriod {
-		c.initReduceTask()
-	}
-}
-
 // initMapTask 向 channel 中传递 map 的任务
 func (c *Coordinator) initMapTask() {
 	lo.ForEach(c.files, func(file string, index int) {
@@ -104,23 +90,37 @@ func (c *Coordinator) initReduceTask() {
 	})
 }
 
+// TryIteration 尝试进行迭代
+func (c *Coordinator) TryIteration() {
+	if len(c.taskCh) != 0 || c.suspendCount.Load() != 0 {
+		return
+	}
+	atomic.AddInt64(&c.period, +1)
+	if c.period == MapPeriod {
+		c.initMapTask()
+	}
+	if c.period == ReducePeriod {
+		c.initReduceTask()
+	}
+}
+
 func (c *Coordinator) Done() bool {
 	return c.period == CompletePeriod
 }
 
-func (c *Coordinator) start() {
+func (c *Coordinator) Start() {
 	for {
 		c.TryIteration()
 		c.reconsumeTask()
 		if c.Done() {
-			c.stop()
+			c.Stop()
 			return
 		}
 		time.Sleep(reconsumeInterval)
 	}
 }
 
-func (c *Coordinator) stop() {
+func (c *Coordinator) Stop() {
 	close(c.taskCh)
 }
 
@@ -139,7 +139,7 @@ func (c *Coordinator) server() {
 }
 
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	size := max(len(files), nReduce) // 这里是为了偷懒，直接让 size 为两者的最大值，这样初始化的时候不用考虑阻塞(开一个 goroutine 其实也可以，这里是为了减少复杂度)
+	size := max(len(files), nReduce) // 这里是偷懒，直接让 size 为两者的最大值，这样初始化 taskCh 的时候不用考虑阻塞(开一个 goroutine 其实也可以，这里是为了减少复杂度)
 	c := Coordinator{
 		files:        files,
 		middleFiles:  make([][]string, nReduce),
@@ -151,7 +151,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		mu:           sync.RWMutex{},
 	}
 
-	go c.start()
+	go c.Start()
 	c.server()
 	return &c
 }
